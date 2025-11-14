@@ -123,20 +123,29 @@ def remote_cpu_script(process_name: str, label: str, samples: int) -> str:
         fi
         cores=$(nproc)
         samples={samples}
-        sudo pidstat -u -p "$pid" 1 "$samples" |
-          awk -v cores="$cores" -v label="{label}" '
-            $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ {{usr+=$5; sys+=$6; guest+=$7; n++}}
+        sudo pidstat -t -u -p "$pid" 1 "$samples" |
+          awk -v cores="$cores" -v label="{label}" -v samples={samples} '
+            $3 ~ /^[0-9]+$/ && $5 == pid {{
+              global_usr+=$6; global_sys+=$7; global_n++
+            }}
+            $3 ~ /^[0-9]+$/ && $5 ~ /^[0-9]+$/ && $5 != pid {{
+              perthread[$5" "$11]+=$6+$7
+            }}
             END {{
-              if (n==0) {{
+              if (global_n==0 && global_usr==0 && global_sys==0) {{
                 printf "%s CPU: USER=0 SYS=0 TOTAL=0\\n", label
-                exit
+              }} else {{
+                user=(global_usr/(global_n>0?global_n:samples))/cores
+                sys=(global_sys/(global_n>0?global_n:samples))/cores
+                printf "%s CPU: USER=%.2f%% SYS=%.2f%% TOTAL=%.2f%%\\n", label, user, sys, user+sys
               }}
-              user=(usr/n)/cores
-              sys=(sys/n)/cores
-              guest=(guest/n)/cores
-              printf "%s CPU: USER=%.2f%% SYS=%.2f%% TOTAL=%.2f%%\\n",
-                     label, user, sys, user+sys+guest
-            }}'
+              if (length(perthread)) {{
+                printf "%s per-thread (%%CPU):\\n", label
+                for (thread in perthread) {{
+                  printf "  %s: %.2f%%\\n", thread, perthread[thread]/samples/cores
+                }}
+              }}
+            }}' pid=$pid
         """
     ).strip()
 
