@@ -126,17 +126,25 @@ def remote_cpu_script(process_name: str, label: str, samples: int) -> str:
         sudo pidstat -t -u -p "$pid" 1 "$samples" |
           awk -v cores="$cores" -v label="{label}" -v samples={samples} '
             $3 ~ /^[0-9]+$/ && $5 == pid {{
-              global_usr+=$6; global_sys+=$7; global_n++
+              global_usr[$3]+=$6; global_sys[$3]+=$7; steps[$3]++
             }}
             $3 ~ /^[0-9]+$/ && $5 ~ /^[0-9]+$/ && $5 != pid {{
               perthread[$5" "$11]+=$6+$7
             }}
             END {{
-              if (global_n==0 && global_usr==0 && global_sys==0) {{
+              total_usr=0; total_sys=0; total_samples=0
+              for (idx in global_usr) {{
+                avg_usr=global_usr[idx]/steps[idx]
+                avg_sys=global_sys[idx]/steps[idx]
+                total_usr+=avg_usr
+                total_sys+=avg_sys
+                total_samples++
+              }}
+              if (total_samples==0) {{
                 printf "%s CPU: USER=0 SYS=0 TOTAL=0\\n", label
               }} else {{
-                user=(global_usr/(global_n>0?global_n:samples))/cores
-                sys=(global_sys/(global_n>0?global_n:samples))/cores
+                user=(total_usr/total_samples)/cores
+                sys=(total_sys/total_samples)/cores
                 printf "%s CPU: USER=%.2f%% SYS=%.2f%% TOTAL=%.2f%%\\n", label, user, sys, user+sys
               }}
               if (length(perthread)) {{
