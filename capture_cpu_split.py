@@ -116,9 +116,6 @@ def build_ssh_command(client_ip: str, target_ip: str, key_path: Path, remote_scr
 def remote_cpu_script(process_name: str, label: str, samples: int) -> str:
     return textwrap.dedent(
         f"""
-        set -e
-        set -u
-        set -o pipefail
         pid=$(pgrep {process_name} | head -n1)
         if [ -z "$pid" ]; then
           echo "{label}: process '{process_name}' not found" >&2
@@ -128,14 +125,17 @@ def remote_cpu_script(process_name: str, label: str, samples: int) -> str:
         samples={samples}
         sudo pidstat -u -p "$pid" 1 "$samples" |
           awk -v cores="$cores" -v label="{label}" '
-            /^[0-9]/ {{usr+=$5; sys+=$6; tot+=$9; n++}}
+            $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ {{usr+=$5; sys+=$6; guest+=$7; n++}}
             END {{
               if (n==0) {{
                 printf "%s CPU: USER=0 SYS=0 TOTAL=0\\n", label
                 exit
               }}
+              user=(usr/n)/cores
+              sys=(sys/n)/cores
+              guest=(guest/n)/cores
               printf "%s CPU: USER=%.2f%% SYS=%.2f%% TOTAL=%.2f%%\\n",
-                     label, (usr/n)/cores, (sys/n)/cores, (tot/n)/cores
+                     label, user, sys, user+sys+guest
             }}'
         """
     ).strip()
