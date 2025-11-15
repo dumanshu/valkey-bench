@@ -20,7 +20,9 @@ from botocore.config import Config
 DEFAULT_REGION = "us-east-1"
 DEFAULT_SEED = "vlklt-001"
 DEFAULT_PROFILE = os.environ.get("AWS_PROFILE", "sandbox")
-DEFAULT_STAT = "listener.workers.request_time"  # Envoy in-process request handling
+# Default to Envoy's end-to-end downstream request latency histogram
+# (includes listener processing; adjust with --stat-name as needed).
+DEFAULT_STAT = "downstream_rq_time"
 DEFAULT_WINDOW = 30
 BOTO_CONFIG = Config(
     retries={"max_attempts": 10, "mode": "adaptive"},
@@ -139,7 +141,11 @@ def main():
     default_key = Path(__file__).resolve().with_name("valkey-load-test-key.pem")
     ap.add_argument("--ssh-key", default=str(default_key), help=f"Path to SSH key for ec2-user (default: {default_key})")
     ap.add_argument("--client-ip", help="Override client public IP (auto if omitted)")
-    ap.add_argument("--stat-name", default=DEFAULT_STAT, help="Histogram stat name without 'histogram.'")
+    ap.add_argument(
+        "--stat-name",
+        action="append",
+        help="Histogram stat name(s) without 'histogram.'. Can be repeated (default: downstream_rq_time).",
+    )
     ap.add_argument("--window-seconds", type=int, default=DEFAULT_WINDOW, help="Seconds between snapshots")
     ap.add_argument("--print-raw", action="store_true", help="Also print raw histogram lines per Envoy.")
     args = ap.parse_args()
@@ -159,19 +165,29 @@ def main():
         raise SystemExit("No Envoy instances found.")
     envoy_nodes.sort(key=lambda x: int(x.role.split("-", 1)[1]) if "-" in x.role else 0)
 
-    results: Dict[str, Tuple[float, float, float]] = {}
-    raw_outputs: Dict[str, str] = {}
-    for info in envoy_nodes:
-        sys.stdout.write(f"Collecting {args.stat_name} from {info.role}...\n")
-        sys.stdout.flush()
-        raw = fetch_histogram(client_ip, info.private_ip, key_path, args.stat_name, args.window_seconds)
-        raw_outputs[info.role] = raw
-        results[info.role] = parse_histogram(raw)
+    stat_list = args.stat_name if args.stat_name else [DEFAULT_STAT]
+    # dedupe while preserving order
+    seen = set()
+    ordered_stats = []
+    for s in stat_list:
+        if s not in seen:
+            seen.add(s)
+            ordered_stats.append(s)
 
-    print_table(results, args.stat_name, args.window_seconds)
-    if args.print_raw:
-        for role in sorted(raw_outputs.keys()):
-            print(f"\nRaw histogram lines for {role}:\n{raw_outputs[role]}\n")
+    for stat in ordered_stats:
+        results: Dict[str, Tuple[float, float, float]] = {}
+        raw_outputs: Dict[str, str] = {}
+        for info in envoy_nodes:
+            sys.stdout.write(f"Collecting {stat} from {info.role}...\n")
+            sys.stdout.flush()
+            raw = fetch_histogram(client_ip, info.private_ip, key_path, stat, args.window_seconds)
+            raw_outputs[info.role] = raw
+            results[info.role] = parse_histogram(raw)
+
+        print_table(results, stat, args.window_seconds)
+        if args.print_raw:
+            for role in sorted(raw_outputs.keys()):
+                print(f"\nRaw histogram lines for {role} ({stat}):\n{raw_outputs[role]}\n")
 
 
 if __name__ == "__main__":
