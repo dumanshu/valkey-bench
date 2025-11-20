@@ -79,7 +79,7 @@ VALKEY_BIN_URL = os.environ.get(
     f"https://github.com/valkey-io/valkey/releases/download/valkey-{VALKEY_VERSION}/valkey-{VALKEY_VERSION}-linux-arm64.tar.gz",
 )
 VALKEY_DOCKER_IMAGE = os.environ.get("VALKEY_DOCKER_IMAGE", f"valkey/valkey:{VALKEY_VERSION}")
-ENVOY_DOCKER_IMAGE = os.environ.get("ENVOY_DOCKER_IMAGE", "envoyproxy/envoy:v1.31.0")
+ENVOY_DOCKER_IMAGE = os.environ.get("ENVOY_DOCKER_IMAGE", "envoyproxy/envoy-debug:v1.31.0")
 MEMTIER_VERSION = os.environ.get("MEMTIER_VERSION", "2.0.0")
 MEMTIER_SRC_URL = os.environ.get(
     "MEMTIER_SRC_URL",
@@ -1162,21 +1162,7 @@ def delete_stack_network_interfaces(vpc_id):
                 raise
 
 
-def delete_stack_nat_and_eip():
-    nat_id, _state = get_nat()
-    if nat_id:
-        log(f"DELETING NAT gateway: {nat_id}")
-        try:
-            ec2().delete_nat_gateway(NatGatewayId=nat_id)
-        except botocore.exceptions.ClientError as e:
-            if e.response["Error"]["Code"] != "NatGatewayNotFound":
-                raise
-        for attempt in range(60):
-            remaining, _ = get_nat()
-            if remaining is None:
-                break
-            log("NAT gateway still deleting; waiting 10s...")
-            time.sleep(10)
+def release_stack_eip():
     eipalloc = get_eip()
     if eipalloc:
         log(f"RELEASING EIP allocation: {eipalloc}")
@@ -1185,6 +1171,37 @@ def delete_stack_nat_and_eip():
         except botocore.exceptions.ClientError as e:
             if e.response["Error"]["Code"] != "InvalidAllocationID.NotFound":
                 raise
+
+
+def wait_for_nat_deletion():
+    for attempt in range(60):
+        remaining, _ = get_nat()
+        if remaining is None:
+            return True
+        log("NAT gateway still deleting; waiting 10s...")
+        time.sleep(10)
+    log("Warning: NAT gateway still present after waiting.")
+    return False
+
+
+def delete_stack_nat_and_eip(wait_for_completion=False):
+    nat_id, _state = get_nat()
+    pending_nat = False
+    if nat_id:
+        log(f"DELETING NAT gateway: {nat_id}")
+        try:
+            ec2().delete_nat_gateway(NatGatewayId=nat_id)
+        except botocore.exceptions.ClientError as e:
+            if e.response["Error"]["Code"] != "NatGatewayNotFound":
+                raise
+        if wait_for_completion:
+            wait_for_nat_deletion()
+        else:
+            pending_nat = True
+            log("NAT deletion initiated; will verify at the end of cleanup.")
+    if not pending_nat:
+        release_stack_eip()
+    return pending_nat
 
 
 def delete_stack_subnets(vpc_id):
@@ -1249,13 +1266,19 @@ def cleanup_stack_once():
         delete_stack_load_balancer()
         delete_stack_target_group()
         delete_stack_security_groups()
-        delete_stack_nat_and_eip()
+        nat_pending = delete_stack_nat_and_eip(wait_for_completion=False)
         delete_stack_route_tables()
         for vpc in vpcs:
             delete_stack_network_interfaces(vpc["VpcId"])
         for vpc in vpcs:
             delete_stack_subnets(vpc["VpcId"])
             delete_stack_igw_and_vpc(vpc["VpcId"])
+        if nat_pending:
+            log("Verifying NAT gateway deletion at the end of cleanup...")
+            if wait_for_nat_deletion():
+                release_stack_eip()
+            else:
+                log("Cleanup warning: NAT gateway still exists; rerun cleanup later to finish EIP release.")
         log("Cleanup complete. Flamegraph S3 bucket retained.")
     finally:
         LOG_TO_FILE = None
